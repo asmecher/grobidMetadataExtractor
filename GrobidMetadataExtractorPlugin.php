@@ -13,6 +13,7 @@
 namespace APP\plugins\generic\grobidMetadataExtractor;
 
 use APP\core\Application;
+use PKP\affiliation\Affiliation;
 use PKP\config\Config;
 use PKP\core\Registry;
 use PKP\facades\Locale;
@@ -106,7 +107,14 @@ class GrobidMetadataExtractorPlugin extends GenericPlugin
             $author->setData('email', '');
             $author->setData('givenName', $xpath->query('tei:persName/tei:forename[@type="first"]', $authorNode)->item(0)->nodeValue, $primaryLocale);
             $author->setData('familyName', $xpath->query('tei:persName/tei:surname', $authorNode)->item(0)->nodeValue, $primaryLocale);
-            $author->setData('affiliation', $xpath->query('tei:affiliation/tei:orgName', $authorNode)->item(0)->nodeValue, $primaryLocale);
+            $affiliation = new Affiliation();
+            $name = $xpath->query('tei:affiliation/tei:orgName', $authorNode)->item(0)->nodeValue;
+            $affiliation->setName($name, $primaryLocale);
+            $ror = Repo::ror()->getCollector()->filterByName($name)->getMany()->first();
+            if ($ror) {
+                $affiliation->setRor($ror->getRor());
+                $affiliation->setName(null);
+            }
             $author->setData('publicationId', $submission->getCurrentPublication()->getId());
             Repo::author()->add($author);
         }
