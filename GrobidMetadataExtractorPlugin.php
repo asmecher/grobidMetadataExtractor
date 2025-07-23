@@ -21,9 +21,24 @@ use PKP\plugins\GenericPlugin;
 use PKP\db\DAORegistry;
 use PKP\plugins\Hook;
 use APP\facades\Repo;
+use PKP\userGroup\UserGroup;
+use PKP\security\Role;
 
 class GrobidMetadataExtractorPlugin extends GenericPlugin
 {
+    var $supportedMimeTypes = [
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/msword',
+        'application/vnd.oasis.opendocument.text',
+        'application/pdf',
+    ];
+
+    var $convertMimeTypes = [
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        'application/msword',
+        'application/vnd.oasis.opendocument.text',
+    ];
+
     /**
      * @copydoc Plugin::register()
      *
@@ -72,28 +87,59 @@ class GrobidMetadataExtractorPlugin extends GenericPlugin
         // Do not submit to Grobid if the submission file does not look like the sort we want
         if (
             $submission->getData('submissionProgress') != 'start' ||
-//          $submission->getData('grobidded') || // FIXME Disabled for dev
+            ($submission->getData('grobidded') && !Config::getVar('grobidMetadataExtractor', 'repeat')) ||
             $submissionFile->getFileStage() != $submissionFile::SUBMISSION_FILE_SUBMISSION ||
             $genre->getKey() != 'SUBMISSION' ||
-            !$file
+            !$file ||
+            !in_array($file->mimetype, $this->supportedMimeTypes)
         ) return Hook::CONTINUE;
 
+        // Some files must be converted to PDF before Grobid can be executed on them.
+        if (in_array($file->mimetype, $this->convertMimeTypes)) {
+            // Copy the uploaded file into the temp directory (in case flysystem is using e.g. a remote filesystem)
+            $inputFilePath = tempnam(sys_get_temp_dir(), 'unoconv');
+            file_put_contents($inputFilePath, $pkpFileService->fs->read($file->path));
+
+            // Create an output filename for unoconv to use
+            $convertedFilePath = tempnam(sys_get_temp_dir(), 'unoconv');
+            unlink($convertedFilePath);
+            $convertedFilePath .= '.pdf';
+
+            $output = $result_code = null;
+            exec(
+                Config::getVar('grobidMetadataExtractor', 'unoconv', '/usr/bin/unoconv') . ' -o ' . escapeshellarg($convertedFilePath) . ' ' .
+                escapeshellarg($inputFilePath),
+                $output, $result_code
+            );
+            if ($result_code != 0) {
+                error_log('Grobid metadata extraction: unoconv failed to convert ' . $file->path . ' to PDF.');
+                return Hook::CONTINUE;
+            }
+            $inputFileContents = file_get_contents($convertedFilePath);
+            unlink($inputFilePath);
+            unlink($convertedFilePath);
+        } else {
+            $inputFileContents = $pkpFileService->fs->read($file->path);
+        }
+
+        // Invoke the Grobid client.
         $client = Application::get()->getHttpClient();
         $response = $client->request(
             'POST',
-            'http://localhost:8070/api/processHeaderDocument', // FIXME
+            Config::getVar('grobidMetadataExtractor', 'grobid_api_url', 'http://localhost:8070/api/processHeaderDocument'),
             [
-                        'headers' => [
-                            'Accept' => 'application/xml',
-                        ],
+                'headers' => [
+                    'Accept' => 'application/xml',
+                ],
                 'multipart' => [
                     [
                         'name' => 'input',
-                        'contents' => $pkpFileService->fs->read($file->path),
+                        'contents' => $inputFileContents,
                     ],
                 ],
             ],
         );
+
         $doc = new \DOMDocument();
         $doc->loadXML((string) $response->getBody());
         $xpath = new \DOMXPath($doc);
@@ -102,22 +148,50 @@ class GrobidMetadataExtractorPlugin extends GenericPlugin
         $xpath->registerNamespace('xlink', 'http://www.w3.org/1999/xlink');
 
         $primaryLocale = $xpath->query('//tei:TEI/tei:teiHeader')->item(0)->getAttribute('xml:lang');
+        $currentPublication = $submission->getCurrentPublication();
+
+        // Extract the title & abstract
+        foreach ($xpath->query('//tei:TEI/tei:teiHeader/tei:fileDesc/tei:titleStmt/tei:title') as $titleNode) {
+            $currentPublication->setData('title', [$primaryLocale => htmlspecialchars($titleNode->nodeValue)]);
+        }
+        foreach ($xpath->query('//tei:TEI/tei:teiHeader/tei:profileDesc/tei:abstract') as $abstractNode) {
+            $currentPublication->setData('abstract', [$primaryLocale => htmlspecialchars($abstractNode->nodeValue)]);
+        }
+
+        // Extract author data
         foreach ($xpath->query('//tei:TEI/tei:teiHeader/tei:fileDesc/tei:sourceDesc/tei:biblStruct/tei:analytic/tei:author') as $authorNode) {
             $author = app(\APP\author\Author::class);
-            $author->setData('email', '');
+
+            $submitAsUserGroup = UserGroup::withContextIds($submission->getData('contextId'))->withRoleIds(Role::ROLE_ID_AUTHOR)->first();
+            if (!$submitAsUserGroup) {
+                error_log('Grobid metadata extraction: aborting; no available author submitter user group.');
+                return Hook::CONTINUE;
+            }
+            $author->setData('userGroupId', $submitAsUserGroup->id);
+
+            $author->setData('email', ''); // This should be removed when author emails are made optional
             $author->setData('givenName', $xpath->query('tei:persName/tei:forename[@type="first"]', $authorNode)->item(0)->nodeValue, $primaryLocale);
             $author->setData('familyName', $xpath->query('tei:persName/tei:surname', $authorNode)->item(0)->nodeValue, $primaryLocale);
-            $affiliation = new Affiliation();
-            $name = $xpath->query('tei:affiliation/tei:orgName', $authorNode)->item(0)->nodeValue;
-            $affiliation->setName($name, $primaryLocale);
-            $ror = Repo::ror()->getCollector()->filterByName($name)->getMany()->first();
-            if ($ror) {
-                $affiliation->setRor($ror->getRor());
-                $affiliation->setName(null);
-            }
-            $author->setData('publicationId', $submission->getCurrentPublication()->getId());
+            $author->setData('publicationId', $currentPublication->getId());
             Repo::author()->add($author);
+
+            foreach ($xpath->query('tei:affiliation/tei:orgName[@type="institution"]', $authorNode) as $institutionNode) {
+                $institutionName = $institutionNode->nodeValue;
+                $affiliation = new Affiliation();
+                $rorMatches = Repo::ror()->getCollector()->filterByName($institutionName)->getMany();
+                if ($rorMatches->count() == 1) {
+                    $ror = $rorMatches->first();
+                    $affiliation->setRor($ror->getRor());
+                    $affiliation->setName(null);
+                } else {
+                    $affiliation->setName($institutionName, $primaryLocale);
+                }
+                $affiliation->setAuthorId($author->getId());
+                Repo::affiliation()->add($affiliation);
+            }
         }
+
+        Repo::publication()->edit($currentPublication, ['title', 'abstract']);
 
         // Stamp that the submission has been "grobidded"; we only do this once per submission.
         Repo::submission()->edit($submission, ['grobidded' => true]);
