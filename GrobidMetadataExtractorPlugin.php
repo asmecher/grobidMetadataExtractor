@@ -49,6 +49,7 @@ class GrobidMetadataExtractorPlugin extends GenericPlugin
         if (parent::register($category, $path, $mainContextId)) {
             if ($this->getEnabled($mainContextId)) {
                 Hook::add('Schema::get::submission', $this->augmentSubmissionSchema(...));
+                Hook::add('Schema::get::submissionFile', $this->augmentSubmissionFileSchema(...));
                 Hook::add('SubmissionFile::edit', $this->editSubmissionFile(...));
             }
             return true;
@@ -71,6 +72,23 @@ class GrobidMetadataExtractorPlugin extends GenericPlugin
 
         return Hook::CONTINUE;
     }
+
+    /**
+     * Add properties to the submission file object.
+     */
+    public function augmentSubmissionFileSchema(string $hookName, array $params): bool
+    {
+        $schema =& $params[0];
+
+        $schema->properties->grobidded = (object) [
+            'type' => 'boolean',
+            'description' => 'True if Grobid sourced metadata from this submission file',
+            'validation' => ['nullable'],
+        ];
+
+        return Hook::CONTINUE;
+    }
+
 
     function editSubmissionFile(string $hookName, array $args) : bool
     {
@@ -193,8 +211,9 @@ class GrobidMetadataExtractorPlugin extends GenericPlugin
 
         Repo::publication()->edit($currentPublication, ['title', 'abstract']);
 
-        // Stamp that the submission has been "grobidded"; we only do this once per submission.
+        // Stamp that the submission and submission file have been "grobidded"
         Repo::submission()->edit($submission, ['grobidded' => true]);
+        $submissionFile->setData('grobidded', true);
 
         return Hook::CONTINUE;
     }
