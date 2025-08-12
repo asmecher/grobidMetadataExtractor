@@ -12,6 +12,7 @@
 
 namespace APP\plugins\generic\grobidMetadataExtractor;
 
+use APP\template\TemplateManager;
 use APP\core\Application;
 use PKP\affiliation\Affiliation;
 use PKP\config\Config;
@@ -51,11 +52,41 @@ class GrobidMetadataExtractorPlugin extends GenericPlugin
                 Hook::add('Schema::get::submission', $this->augmentSubmissionSchema(...));
                 Hook::add('Schema::get::submissionFile', $this->augmentSubmissionFileSchema(...));
                 Hook::add('SubmissionFile::edit', $this->editSubmissionFile(...));
+                Hook::add('TemplateManager::display', $this->handleReloadInSubmissionWizard(...));
             }
             return true;
         }
         return false;
     }
+
+	/**
+	 * Detect when to reload publication in submission wizard
+	 */
+	function handleReloadInSubmissionWizard($hookName, $params) {
+		$request = Application::get()->getRequest();
+
+		if ($request->getRequestedPage() !== 'submission') {
+			return;
+		}
+
+		if ($request->getRequestedOp() === 'saved') {
+			return;
+		}
+
+		$templateMgr = $params[0];
+
+		$templateMgr->addJavaScript(
+			'plugin-funder-submission-wizard',
+            $request->getBaseUrl() . '/' . $this->getPluginPath() . '/js/GrobidSubmissionWizard.js',
+            [
+				'contexts' => 'backend',
+				'priority' => TemplateManager::STYLE_SEQUENCE_LATE,
+			]
+		);
+
+		return false;
+	}
+
 
     /**
      * Add properties to the submission object.
