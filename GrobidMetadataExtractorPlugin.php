@@ -59,33 +59,33 @@ class GrobidMetadataExtractorPlugin extends GenericPlugin
         return false;
     }
 
-	/**
-	 * Detect when to reload publication in submission wizard
-	 */
-	function handleReloadInSubmissionWizard($hookName, $params) {
-		$request = Application::get()->getRequest();
+        /**
+         * Detect when to reload publication in submission wizard
+         */
+        function handleReloadInSubmissionWizard($hookName, $params) {
+                $request = Application::get()->getRequest();
 
-		if ($request->getRequestedPage() !== 'submission') {
-			return;
-		}
+                if ($request->getRequestedPage() !== 'submission') {
+                        return;
+                }
 
-		if ($request->getRequestedOp() === 'saved') {
-			return;
-		}
+                if ($request->getRequestedOp() === 'saved') {
+                        return;
+                }
 
-		$templateMgr = $params[0];
+                $templateMgr = $params[0];
 
-		$templateMgr->addJavaScript(
-			'plugin-funder-submission-wizard',
+                $templateMgr->addJavaScript(
+                        'plugin-funder-submission-wizard',
             $request->getBaseUrl() . '/' . $this->getPluginPath() . '/js/GrobidSubmissionWizard.js',
             [
-				'contexts' => 'backend',
-				'priority' => TemplateManager::STYLE_SEQUENCE_LATE,
-			]
-		);
+                                'contexts' => 'backend',
+                                'priority' => TemplateManager::STYLE_SEQUENCE_LATE,
+                        ]
+                );
 
-		return false;
-	}
+                return false;
+        }
 
 
     /**
@@ -222,6 +222,12 @@ class GrobidMetadataExtractorPlugin extends GenericPlugin
             $author->setData('givenName', $xpath->query('tei:persName/tei:forename[@type="first"]', $authorNode)->item(0)->nodeValue, $primaryLocale);
             $author->setData('familyName', $xpath->query('tei:persName/tei:surname', $authorNode)->item(0)->nodeValue, $primaryLocale);
             $author->setData('publicationId', $currentPublication->getId());
+
+            // We don't yet have a way to direct the submitting author to complete a partial record, so if an author record
+            // is missing important fields, do not create it automatically.
+            if (count(Repo::author()->validate($author, [], $submission, Application::get()->getRequest()->getContext()))) {
+                continue;
+            }
             Repo::author()->add($author);
 
             foreach ($xpath->query('tei:affiliation/tei:orgName[@type="institution"]', $authorNode) as $institutionNode) {
