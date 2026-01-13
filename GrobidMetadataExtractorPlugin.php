@@ -271,7 +271,3 @@ class GrobidMetadataExtractorPlugin extends GenericPlugin
         return __('plugins.generic.grobidMetadataExtractor.description');
     }
 }
-
-if (!PKP_STRICT_MODE) {
-    class_alias('\APP\plugins\generic\grobidMetadataExtractor\GrobidMetadataExtractorPlugin', '\GrobidMetadataExtractorPlugin');
-}
